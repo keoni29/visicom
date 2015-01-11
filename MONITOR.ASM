@@ -2,6 +2,9 @@
 ; VISICOM Monitor program
 ; Processor: TMS7001 @ 3,579545MHz
 
+rxcnt		.equ	60
+rxp			.equ	(rxcnt + 1)
+ch			.equ	32
 _LEDPIN		.equ	2
 _ACIA_SETUP .equ	(1<<7) | (1<<4) | (1 << 0)
 ; Notes on ACIA setup
@@ -12,33 +15,59 @@ _ACIA_SETUP .equ	(1<<7) | (1<<4) | (1 << 0)
 		.include "TMS7000.INC"
 		.include "VISICOM.INC"
 		.org $C000
-init	mov %72,B								; Initialize stack
+init	mov %72,B							; Initialize stack
 		ldsp
-		movp %0,BPORT							; 19200 baud serial clock
-		movp %3,ACIA_CR							; Reset ACIA
-		orp %(1<<_LEDPIN),ADDR					; Set LED pin to output
-		orp %(1<<4)|(1<<0),IOCNT0				; Enable INT1 & INT3
+		movp %0,BPORT						; 19200 baud serial clock
+		movp %3,ACIA_CR						; Reset ACIA
+		orp %(1<<_LEDPIN),ADDR				; Set LED pin to output
+		orp %(1<<4)|(1<<0),IOCNT0			; Enable INT1 & INT3
 		call @delay
-		movp %_ACIA_SETUP,ACIA_CR				; Initialize ACIA
-		eint									; Enable interrupts
+		movp %_ACIA_SETUP,ACIA_CR			; Initialize ACIA
+		call @delay
+
+		mov %1,rxcnt
+		mov %1,rxp
+		mov %30,A
+		sta @RX_BUFF
 restart	mov %0,B
-loop	lda @str_hi(B)							; Load char from rom
-		jz end									; Check if end of string
-		call @aputc								; Print over serial
-		inc R1									; Go to next character
+puts	lda @str_hi(B)						; Load char from rom
+		jz puts_end							; Check if end of string
+		call @aputc							; Print over serial
+		inc R1								; Go to next character
+		jmp puts
+puts_end
+		eint								; Enable interrupts
+loop	call @getc							; Read character
+		jz no_char
+		call @aputc							; Echo character
+no_char
 		jmp loop
-end		jmp end
 
-
-aputc	btjzp %2,ACIA_SR,aputc					; Wait until char can be sent
-		movp A,ACIA_DR							; Send char
+getc	btjo %255,rxcnt,process_rx_buff		; Check if buffer is not empty
+		clr A
 		rets
-bputc	btjzp %2,ACIA_SR,aputc					; Wait until char can be sent
-		movp B,ACIA_DR							; Send char
+process_rx_buff
+		call @blink
+		movd rxp,R1							; Calculate read offset
+		sub R0,B
+		and %63,B
+		dec rxcnt							; Decrease read offset
+		lda @RX_BUFF(B)						; Read character from buffer
+		rets
+
+aputc	btjzp %2,ACIA_SR,aputc				; Wait until char can be sent
+		movp A,ACIA_DR						; Send char
+		rets
+bputc	btjzp %2,ACIA_SR,aputc				; Wait until char can be sent
+		movp B,ACIA_DR						; Send char
+		rets
+
+blink	xorp %(1<<_LEDPIN),APORT			; Toggle LED
+		call @delay
 		rets
 
 delay	push B
-		mov %50,A
+		mov %30,A
 delay1	mov %0,B
 delay2	nop
 		nop
@@ -49,16 +78,27 @@ delay2	nop
 		pop B
 		rets
 
+
+
+put_rxbuff
+		btjo %>64,rxcnt,@rx_full 				; Check if buffer is full
+		mov rxp,B            				; 
+		and %63,B            				; Limit buffer size to 64 bytes
+		sta @RX_BUFF(B)      				; Store character in buffer
+		inc rxp              				; Advance buffer pointer
+		inc rxcnt              				; Increase read offset
+rx_full	;xorp %(1<<_LEDPIN),APORT			; Toggle LED
+		rets
+
 ISR_ACIA_rx
 		push A
 		push B
-		btjzp %1,ACIA_SR,rx_empty				; Char received?
-		movp ACIA_DR,B							; Read char & clear interrupt
-		xorp %(1<<_LEDPIN),APORT				; Toggle LED
-		call @bputc
+		btjzp %1,ACIA_SR,rx_empty			; Char received?
+		movp ACIA_DR,A						; Read char & clear interrupt
+		call @put_rxbuff					; char >> rx buffer and echo
 rx_empty
 s_wait	movp ACIA_DR,A
-		btjop %2,P0,@s_wait						; Check if int1	
+		btjop %2,P0,@s_wait					; Check if int1	
 		pop B
 		pop A
 		reti
@@ -66,13 +106,12 @@ s_wait	movp ACIA_DR,A
 ISR_KBENC
 		push A
 		push B
-k_wait	movp KBENC,B							; Read key
-		TSTA                 					; Dummy instruction
-		NOP                  					; Dummy instruction
-		BTJOP %32,P0,@k_wait					; Check if int3				
-		lda @kb_lut(B)							; Get char from table
-		call @aputc								; Print character
-		xorp %(1<<_LEDPIN),APORT				; Toggle LED
+k_wait	movp KBENC,B						; Read key
+		TSTA                 				; Dummy instruction
+		NOP                  				; Dummy instruction
+		btjop %32,P0,@k_wait				; Check if int3
+		lda @kb_lut(B)						; Get char from table
+		call @put_rxbuff					; char >> rx buffer and echo
 		pop B
 		pop A
 		reti
