@@ -1,0 +1,4 @@
+ACIA_CR		.equ	128
+ACIA_SR		.equ	128
+ACIA_DR		.equ	129
+KBENC		.equ	144
